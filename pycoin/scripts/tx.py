@@ -62,7 +62,7 @@ def sighash_type_to_string(sighash_type):
     return sighash_str
 
 
-def dump_tx(tx, netcode='BTC', verbose_signature=False):
+def dump_tx(tx, netcode='BTC', verbose_signature=False, include_disassembly=False):
     address_prefix = address_prefix_for_netcode(netcode)
     tx_bin = stream_to_bytes(tx.stream)
     print("Version: %2d  tx hash %s  %d bytes   " % (tx.version, tx.id(), len(tx_bin)))
@@ -80,6 +80,8 @@ def dump_tx(tx, netcode='BTC', verbose_signature=False):
     for idx, tx_in in enumerate(tx.txs_in):
         if tx.is_coinbase():
             print("%4d: COINBASE  %12.5f mBTC" % (idx, satoshi_to_mbtc(tx.total_in())))
+            if include_disassembly:
+                print("  script as hex: %s" % b2h(tx_in.script))
         else:
             suffix = ""
             if tx.missing_unspent(idx):
@@ -93,37 +95,58 @@ def dump_tx(tx, netcode='BTC', verbose_signature=False):
             t = "%4d: %34s from %s:%-4d%s" % (idx, address, b2h_rev(tx_in.previous_hash),
                                               tx_in.previous_index, suffix)
             print(t.rstrip())
-            if verbose_signature:
+            if include_disassembly:
                 signatures = []
-                for opcode in opcode_list(tx_in.script):
-                    if not opcode.startswith("OP_"):
-                        try:
-                            signatures.append(parse_signature_blob(h2b(opcode)))
-                        except UnexpectedDER:
-                            pass
-                if signatures:
-                    sig_types_identical = (zip(*signatures)[1]).count(signatures[0][1]) == len(signatures)
-                    i = 1 if len(signatures) > 1 else ''
-                    for sig_pair, sig_type in signatures:
-                        print("      r{0}: {1:#x}\n      s{0}: {2:#x}".format(i, *sig_pair))
-                        if not sig_types_identical and tx_out:
-                            print("      z{}: {:#x} {}".format(i, tx.signature_hash(tx_out.script, idx, sig_type),
-                                                               sighash_type_to_string(sig_type)))
-                        if i: i += 1
-                    if sig_types_identical and tx_out:
-                        print("      z:{} {:#x} {}".format(' ' if i else '', tx.signature_hash(tx_out.script, idx, sig_type),
-                                                           sighash_type_to_string(sig_type)))
+                print("    ** REDEEM SCRIPT")
+                for opcode in annotated_opcode_list(tx_in.script, tx, idx, verbose_signature):
+                    print("     %s" % opcode)
+                if tx.missing_unspent(idx):
+                    print(" (pay-to script not available)")
+                else:
+                    print("    ** PAY TO SCRIPT")
+                    opcodes = annotated_opcode_list(tx.unspents[idx].script, tx, idx, verbose_signature)
+                    for c in opcodes:
+                        print("     %s" % c)
+
 
     print("Output%s:" % ('s' if len(tx.txs_out) != 1 else ''))
     for idx, tx_out in enumerate(tx.txs_out):
         amount_mbtc = satoshi_to_mbtc(tx_out.coin_value)
         address = tx_out.bitcoin_address(netcode=netcode) or "(unknown)"
         print("%4d: %34s receives %12.5f mBTC" % (idx, address, amount_mbtc))
+        if include_disassembly:
+            for c in annotated_opcode_list(tx_out.script, tx, 0, include_disassembly):
+                print("     %s" % c)
     if not missing_unspents:
         print("Total input  %12.5f mBTC" % satoshi_to_mbtc(tx.total_in()))
     print(    "Total output %12.5f mBTC" % satoshi_to_mbtc(tx.total_out()))
     if not missing_unspents:
         print("Total fees   %12.5f mBTC" % satoshi_to_mbtc(tx.fee()))
+
+
+def annotated_opcode_list(script, tx, tx_in_idx, verbose=False):
+    from pycoin.encoding import sec_to_public_pair, is_sec_compressed, public_pair_to_bitcoin_address, hash160_sec_to_bitcoin_address
+    address_prefix = b"\0"
+    for opcode in opcode_list(script):
+        yield opcode
+        if verbose and not opcode.startswith("OP_"):
+            blob = h2b(opcode)
+            if len(blob) in (71, 72):
+                try:
+                    sig_pair, sig_type = parse_signature_blob(blob)
+                    yield " r: {0:#x}".format(sig_pair[0])
+                    yield " s: {0:#x}".format(sig_pair[1])
+                    yield " z: {:#x} {}".format(tx.signature_hash(script, tx_in_idx, sig_type), sighash_type_to_string(sig_type))
+                except UnexpectedDER:
+                    pass
+            if len(blob) == 33:
+                pair = sec_to_public_pair(blob)
+                is_compressed = is_sec_compressed(blob)
+                yield " SEC for %scompressed %s" % (
+                    "" if is_compressed else "un", public_pair_to_bitcoin_address(
+                        pair, compressed=is_compressed, address_prefix=address_prefix))
+            if len(blob) == 20:
+                yield " [hash for %s]" % hash160_sec_to_bitcoin_address(blob, address_prefix=address_prefix)
 
 
 def check_fees(tx):
@@ -233,6 +256,9 @@ def main():
 
     parser.add_argument('-o', "--output-file", metavar="path-to-output-file", type=argparse.FileType('wb'),
                         help='file to write transaction to. This supresses most other output.')
+
+    parser.add_argument('-d', "--disassemble", action='store_true',
+                        help='Disassemble scripts.')
 
     parser.add_argument('-p', "--pay-to-script", metavar="pay-to-script", action="append",
                         help='a hex version of a script required for a pay-to-script input (a bitcoin address that starts with 3)')
@@ -516,7 +542,7 @@ def main():
     else:
         if not tx.missing_unspents():
             check_fees(tx)
-        dump_tx(tx, args.network, args.verbose_signature)
+        dump_tx(tx, args.network, args.verbose_signature, args.disassemble)
         if include_unspents:
             print("including unspents in hex dump since transaction not fully signed")
         print(tx_as_hex)
