@@ -68,6 +68,31 @@ class BIP32Node(Key):
         return class_(netcode=netcode, chain_code=I64[32:], secret_exponent=from_bytes_32(I64[:32]))
 
     @classmethod
+    def from_hwif_bytes(class_, data, allow_subkey_suffix=True):
+        """Generate a Wallet from a base58 string in a standard way."""
+        # TODO: support subkey suffixes
+
+        netcode, key_type = netcode_and_type_for_data(data)
+
+        if key_type not in ("pub32", "prv32"):
+            raise EncodingError("bad wallet key header")
+
+        is_private = (key_type == 'prv32')
+        parent_fingerprint, child_index = struct.unpack(">4sL", data[5:13])
+
+        d = dict(netcode=netcode, chain_code=data[13:45], depth=ord(data[4:5]),
+                 parent_fingerprint=parent_fingerprint, child_index=child_index)
+
+        if is_private:
+            if data[45:46] != b'\0':
+                raise EncodingError("private key encoded wrong")
+            d["secret_exponent"] = from_bytes_32(data[46:])
+        else:
+            d["public_pair"] = sec_to_public_pair(data[45:])
+
+        return class_(**d)
+
+    @classmethod
     def from_hwif(class_, b58_str, allow_subkey_suffix=True):
         """Generate a Wallet from a base58 string in a standard way."""
         # TODO: support subkey suffixes
